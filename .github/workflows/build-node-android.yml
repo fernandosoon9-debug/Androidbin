@@ -1,26 +1,20 @@
-name: Build Node.js v22 for Android aarch64
+name: Build Node.js v20 for Android aarch64
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
 
     steps:
-      - name: Instalar dependências de build
+      - name: Instalar dependências
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            python3 python3-pip \
-            build-essential \
-            ninja-build \
-            git curl zip \
-            ccache
+            python3 build-essential git curl zip \
+            ninja-build pkg-config ccache
 
       - name: Instalar Android NDK r26b
         run: |
@@ -28,62 +22,91 @@ jobs:
           unzip -q android-ndk-r26b-linux.zip
           echo "NDK_PATH=$PWD/android-ndk-r26b" >> $GITHUB_ENV
 
-      - name: Baixar Node.js v22 source
+      - name: Baixar Node.js v20.19.0 source
         run: |
-          NODE_VERSION="22.14.0"
-          echo "NODE_VERSION=$NODE_VERSION" >> $GITHUB_ENV
-          wget -q https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.gz
-          tar -xzf node-v${NODE_VERSION}.tar.gz
-          echo "NODE_SRC=$PWD/node-v${NODE_VERSION}" >> $GITHUB_ENV
+          wget -q https://nodejs.org/dist/v20.19.0/node-v20.19.0.tar.gz
+          tar -xzf node-v20.19.0.tar.gz
+          echo "NODE_SRC=$PWD/node-v20.19.0" >> $GITHUB_ENV
 
-      - name: Configurar cross-compile para Android aarch64
+      - name: Configurar para Android arm64
         run: |
           cd ${{ env.NODE_SRC }}
-          python3 android-configure \
-            ${{ env.NDK_PATH }} \
-            24 \
-            aarch64
+          python3 android-configure ${{ env.NDK_PATH }} 24 arm64
+
+      - name: Patch - remover execinfo.h (nao existe no bionic)
+        run: |
+          FILE="${{ env.NODE_SRC }}/deps/v8/src/base/debug/stack_trace_posix.cc"
+          if [ -f "$FILE" ]; then
+            sed -i 's/#include <execinfo.h>/#if !defined(__ANDROID__)\n#include <execinfo.h>\n#endif/' "$FILE"
+            sed -i 's/backtrace(trace_, arraysize(trace_))/0/' "$FILE"
+            sed -i 's/backtrace_symbols(trace, static_cast<int>(size))/nullptr/' "$FILE"
+            echo "Patch execinfo aplicado:"
+            grep -n "execinfo\|ANDROID\|backtrace" "$FILE" || echo "OK"
+          else
+            echo "Arquivo nao encontrado, pulando patch"
+          fi
+
+      - name: Patch - remover -lrt do GYP (nao existe no bionic)
+        run: |
+          grep -rl '"-lrt"' ${{ env.NODE_SRC }} | while read f; do
+            sed -i 's/"-lrt",\?//g' "$f"
+            echo "Removido -lrt de: $f"
+          done
 
       - name: Compilar Node.js
         run: |
           cd ${{ env.NODE_SRC }}
-          make -j$(nproc)
+          make -j$(nproc) \
+            CFLAGS="-Wno-error" \
+            CXXFLAGS="-Wno-error" \
+            LDFLAGS="-static-libstdc++"
 
-      - name: Organizar estrutura bin/ lib/ include/ share/
+      - name: Organizar estrutura bin/ lib/ include/
         run: |
           OUTDIR="$PWD/node-android-aarch64"
-          mkdir -p $OUTDIR/bin $OUTDIR/lib/node_modules $OUTDIR/include/node $OUTDIR/share
+          mkdir -p "$OUTDIR/bin" "$OUTDIR/lib/node_modules" "$OUTDIR/include/node"
 
-          cp ${{ env.NODE_SRC }}/out/Release/node $OUTDIR/bin/node
-          chmod +x $OUTDIR/bin/node
+          cp "${{ env.NODE_SRC }}/out/Release/node" "$OUTDIR/bin/node"
+          chmod +x "$OUTDIR/bin/node"
 
-          cp ${{ env.NODE_SRC }}/deps/npm/bin/npm  $OUTDIR/bin/npm  || true
-          cp ${{ env.NODE_SRC }}/deps/npm/bin/npx  $OUTDIR/bin/npx  || true
-          cp -r ${{ env.NODE_SRC }}/deps/npm       $OUTDIR/lib/node_modules/npm || true
-          cp ${{ env.NODE_SRC }}/src/*.h            $OUTDIR/include/node/ || true
+          if [ -d "${{ env.NODE_SRC }}/deps/npm" ]; then
+            cp -r "${{ env.NODE_SRC }}/deps/npm" "$OUTDIR/lib/node_modules/npm"
+
+            cat > "$OUTDIR/bin/npm" <<'EOF'
+#!/bin/sh
+exec "$(dirname "$0")/node" "$(dirname "$0")/../lib/node_modules/npm/bin/npm-cli.js" "$@"
+EOF
+            cat > "$OUTDIR/bin/npx" <<'EOF'
+#!/bin/sh
+exec "$(dirname "$0")/node" "$(dirname "$0")/../lib/node_modules/npm/bin/npx-cli.js" "$@"
+EOF
+            chmod +x "$OUTDIR/bin/npm" "$OUTDIR/bin/npx"
+          fi
+
+          cp "${{ env.NODE_SRC }}/src/"*.h "$OUTDIR/include/node/" 2>/dev/null || true
 
           echo "OUTDIR=$OUTDIR" >> $GITHUB_ENV
+          ls -lh "$OUTDIR/bin/"
 
-      - name: Empacotar em node.zip
+      - name: Empacotar node.zip
         run: |
-          cd ${{ env.OUTDIR }}/..
+          cd "${{ env.OUTDIR }}/.."
           zip -r node.zip node-android-aarch64/
-          echo "ZIP gerado:"
           ls -lh node.zip
-          unzip -l node.zip | grep bin/node
 
       - name: Publicar Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: NodeJS-v${{ env.NODE_VERSION }}-aarch64
-          name: "Node.js v${{ env.NODE_VERSION }} para Android aarch64"
+          tag_name: NodeJS-v20.19.0-aarch64
+          name: "Node.js v20.19.0 Android aarch64"
           body: |
-            Node.js v${{ env.NODE_VERSION }} compilado para Android arm64 (aarch64) com Android NDK r26b, API level 24.
+            Node.js v20.19.0 (LTS) compilado para Android arm64 com NDK r26b, API 24.
 
-            URL para usar no ShellExecutor.java:
-
+            Cole no ShellExecutor.java:
+            ```java
             private static final String NODE_ZIP_URL =
-                "https://github.com/fernandosoon9-debug/Androidbin/releases/download/NodeJS-v${{ env.NODE_VERSION }}-aarch64/node.zip";
+              "https://github.com/fernandosoon9-debug/Androidbin/releases/download/NodeJS-v20.19.0-aarch64/node.zip";
+            ```
           files: node.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
