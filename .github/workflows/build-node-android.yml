@@ -1,0 +1,89 @@
+name: Build Node.js v22 for Android aarch64
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Instalar dependências de build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 python3-pip \
+            build-essential \
+            ninja-build \
+            git curl zip \
+            ccache
+
+      - name: Instalar Android NDK r26b
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
+          unzip -q android-ndk-r26b-linux.zip
+          echo "NDK_PATH=$PWD/android-ndk-r26b" >> $GITHUB_ENV
+
+      - name: Baixar Node.js v22 source
+        run: |
+          NODE_VERSION="22.14.0"
+          echo "NODE_VERSION=$NODE_VERSION" >> $GITHUB_ENV
+          wget -q https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.gz
+          tar -xzf node-v${NODE_VERSION}.tar.gz
+          echo "NODE_SRC=$PWD/node-v${NODE_VERSION}" >> $GITHUB_ENV
+
+      - name: Configurar cross-compile para Android aarch64
+        run: |
+          cd ${{ env.NODE_SRC }}
+          python3 android-configure \
+            ${{ env.NDK_PATH }} \
+            24 \
+            aarch64
+
+      - name: Compilar Node.js
+        run: |
+          cd ${{ env.NODE_SRC }}
+          make -j$(nproc)
+
+      - name: Organizar estrutura bin/ lib/ include/ share/
+        run: |
+          OUTDIR="$PWD/node-android-aarch64"
+          mkdir -p $OUTDIR/bin $OUTDIR/lib/node_modules $OUTDIR/include/node $OUTDIR/share
+
+          cp ${{ env.NODE_SRC }}/out/Release/node $OUTDIR/bin/node
+          chmod +x $OUTDIR/bin/node
+
+          cp ${{ env.NODE_SRC }}/deps/npm/bin/npm  $OUTDIR/bin/npm  || true
+          cp ${{ env.NODE_SRC }}/deps/npm/bin/npx  $OUTDIR/bin/npx  || true
+          cp -r ${{ env.NODE_SRC }}/deps/npm       $OUTDIR/lib/node_modules/npm || true
+          cp ${{ env.NODE_SRC }}/src/*.h            $OUTDIR/include/node/ || true
+
+          echo "OUTDIR=$OUTDIR" >> $GITHUB_ENV
+
+      - name: Empacotar em node.zip
+        run: |
+          cd ${{ env.OUTDIR }}/..
+          zip -r node.zip node-android-aarch64/
+          echo "ZIP gerado:"
+          ls -lh node.zip
+          unzip -l node.zip | grep bin/node
+
+      - name: Publicar Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: NodeJS-v${{ env.NODE_VERSION }}-aarch64
+          name: "Node.js v${{ env.NODE_VERSION }} para Android aarch64"
+          body: |
+            Node.js v${{ env.NODE_VERSION }} compilado para Android arm64 (aarch64) com Android NDK r26b, API level 24.
+
+            URL para usar no ShellExecutor.java:
+
+            private static final String NODE_ZIP_URL =
+                "https://github.com/fernandosoon9-debug/Androidbin/releases/download/NodeJS-v${{ env.NODE_VERSION }}-aarch64/node.zip";
+          files: node.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
